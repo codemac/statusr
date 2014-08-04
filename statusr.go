@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"os/exec"
@@ -38,15 +39,14 @@ func (n *Networker) Get(t time.Time) string {
 
 	devices := make([]string, 0)
 	for _, v := range strings.Split(string(out), "\n") {
-		if v != "" {
+		if v != "" && v != "lo" { // no need to show loopback
 			devices = append(devices, v)
 		}
 	}
 
 	addresses := make([]string, 0)
 	for _, d := range devices {
-		out, err = exec.Command("nmcli", "-t", "-f", "IP4", "dev",
-			"list", "iface", d).CombinedOutput()
+		out, err = exec.Command("nmcli", "-t", "-f", "IP4", "dev", "show", d).CombinedOutput()
 		if err != nil {
 			fmt.Printf("ERR: %q", err)
 		}
@@ -141,17 +141,32 @@ func (v *Volumer) Get(time.Time) string {
 
 }
 
+type Brightnesser struct {
+}
+
+func (b *Brightnesser) Get(time.Time) string {
+	c, err := ioutil.ReadFile("/sys/class/backlight/acpi_video0/brightness")
+	if err != nil {
+		return fmt.Sprintf("ERR: %q", err)
+	}
+	return strings.TrimSpace(string(c))
+}
+
 type CompResult struct {
 	Order   int
 	Content string
 }
 
-func LoopSetTitle(td time.Duration, c <-chan string) {
+func LoopSetTitle(td time.Duration, stdout bool, c <-chan string) {
 	var final string
 	go func() {
 		for _ = range time.Tick(td) {
-			_, _ = exec.Command("xsetroot", "-name", final).CombinedOutput()
-			//fmt.Printf("%s\n", final)
+			if stdout {
+				fmt.Printf("%s\n", final)
+			} else {
+				_, _ = exec.Command("xsetroot", "-name", final).CombinedOutput()
+			}
+
 		}
 	}()
 	for {
@@ -200,11 +215,13 @@ func RunComponent(order int, cmp *Component, cr chan<- CompResult) {
 }
 
 func main() {
-
+	use_stdout := flag.Bool("stdout", false, "Should I print or use xsetroot?")
+	flag.Parse()
 	comps := make([]*Component, 0)
 
 	// these go in order!
 	comps = append(comps, &Component{time.Second, &Networker{}})
+	comps = append(comps, &Component{time.Second, &Brightnesser{}})
 	comps = append(comps, &Component{time.Second, &Batteryer{}})
 	//comps = append(comps, &Component{time.Second, &Volumer{}})
 	comps = append(comps, &Component{time.Second, &Timer{}})
@@ -222,6 +239,6 @@ func main() {
 		}
 	}
 
-	go LoopSetTitle(delta, titler)
+	go LoopSetTitle(delta, *use_stdout, titler)
 	CollectAndConstruct(len(comps), c, titler)
 }
