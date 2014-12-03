@@ -6,11 +6,35 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	//	"os"
 	"os/exec"
+	//	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
+	//	"syscall"
 	"time"
 )
+
+// TBD Support for i3-bar-style signals
+
+func init() {
+	// signalchannel := make(chan os.Signal)
+	// signal.Notify(signalchannel, syscall.SIGSTOP, syscall.SIGCONT)
+	// go func() {
+	// 	for {
+	// 		select {
+	// 		case s := <-signalchannel:
+	// 			switch s {
+	// 			case syscall.SIGSTOP:
+	// 				//				StopComponents()
+	// 			case syscall.SIGCONT:
+	// 				//				StartComponents()
+	// 			}
+	// 		}
+	// 	}
+	// }()
+}
 
 type Component struct {
 	Delta time.Duration
@@ -31,30 +55,59 @@ func (timer *Timer) Get(t time.Time) string {
 type Networker struct {
 }
 
+func contains(s []string, e string) bool {
+	for _, a := range s {
+		if a == e {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *Networker) Get(t time.Time) string {
-	out, err := exec.Command("nmcli", "-t", "-f", "device", "dev").CombinedOutput()
+	type device struct {
+		name string
+		ips  []string
+	}
+
+	out, err := exec.Command("ip", "addr", "show").CombinedOutput()
 	if err != nil {
 		fmt.Printf("ERR: %q", err)
 	}
+	devices := make([]device, 0)
 
-	devices := make([]string, 0)
-	for _, v := range strings.Split(string(out), "\n") {
-		if v != "" && v != "lo" { // no need to show loopback
-			devices = append(devices, v)
+	for _, v := range regexp.MustCompile("(?m)^[0-9]+: ").Split(string(out), -1) {
+		device := device{}
+
+		if len(v) > 0 {
+			lines := strings.Split(v, "\n")
+			device.name = strings.Fields(lines[0])[0]
+			for k := range lines {
+				sections := strings.Fields(lines[k])
+				if len(sections) > 0 &&
+					strings.HasPrefix(sections[0], "inet") &&
+					contains(sections, "global") {
+					// check that it's a "global scope", or routabale outside of this laptop.
+					device.ips = append(device.ips, sections[1])
+				}
+			}
+			// global connections to not show
+			if strings.HasPrefix(device.name, "codebase") ||
+				strings.HasPrefix(device.name, "docker0") {
+				continue
+			}
+
+			devices = append(devices, device)
 		}
 	}
 
 	addresses := make([]string, 0)
-	for _, d := range devices {
-		out, err = exec.Command("nmcli", "-t", "-f", "IP4", "dev", "show", d).CombinedOutput()
-		if err != nil {
-			fmt.Printf("ERR: %q", err)
-		}
 
-		for _, v := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(v, "IP4.ADDRESS") {
-				address := d + ": " + strings.TrimRight(strings.Fields(v)[2], ",")
-				addresses = append(addresses, address)
+	for _, v := range devices {
+		if len(v.ips) > 0 {
+			addresses = append(addresses, v.name)
+			for _, ip := range v.ips {
+				addresses = append(addresses, ip)
 			}
 		}
 	}
@@ -145,11 +198,28 @@ type Brightnesser struct {
 }
 
 func (b *Brightnesser) Get(time.Time) string {
-	c, err := ioutil.ReadFile("/sys/class/backlight/acpi_video0/brightness")
+	c, err := ioutil.ReadFile("/sys/class/backlight/intel_backlight/brightness")
 	if err != nil {
 		return fmt.Sprintf("ERR: %q", err)
 	}
 	return strings.TrimSpace(string(c))
+}
+
+type Mailer struct {
+}
+
+func (m *Mailer) Get(time.Time) string {
+	out, err := exec.Command("notmuch", "count", "tag:inbox").CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("ERR %q", err)
+	}
+
+	n := strings.TrimSpace(string(out))
+	if n == "" {
+		return "m: 0"
+	}
+
+	return "m: " + n
 }
 
 type CompResult struct {
@@ -224,6 +294,7 @@ func main() {
 	comps = append(comps, &Component{time.Second, &Brightnesser{}})
 	comps = append(comps, &Component{time.Second, &Batteryer{}})
 	//comps = append(comps, &Component{time.Second, &Volumer{}})
+	comps = append(comps, &Component{time.Minute, &Mailer{}})
 	comps = append(comps, &Component{time.Second, &Timer{}})
 
 	c := make(chan CompResult)
